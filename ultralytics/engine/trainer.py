@@ -204,7 +204,8 @@ class FeatureLoss(nn.Module):
                 tea_feats.append(t.detach())
             else:
                 # Apply normalization
-                t = self.norm1[idx](t)
+                t = self.norm[idx](t)
+                # s = self.align_module[idx](s)
                 stu_feats.append(s)
                 tea_feats.append(t.detach())
 
@@ -524,10 +525,15 @@ class BaseTrainer:
         self.model = self.model.to(self.device)
         
         # Load teacher model to device
+        # if self.teacher is not None:
+        #     for k, v in self.teacher.named_parameters():
+        #         v.requires_grad = True
+        #     self.teacher = self.teacher.to(self.device)
         if self.teacher is not None:
-            for k, v in self.teacher.named_parameters():
-                v.requires_grad = True
-            self.teacher = self.teacher.to(self.device)
+            self.teacher = self.teacher.to(self.device).eval()
+            for p in self.teacher.parameters():
+                p.requires_grad = False
+
                 
         self.set_model_attributes()
 
@@ -568,9 +574,9 @@ class BaseTrainer:
         if world_size > 1:
             self.model = nn.parallel.DistributedDataParallel(self.model, device_ids=[RANK], find_unused_parameters=True)
             
-            if self.teacher is not None:
-                self.teacher = nn.parallel.DistributedDataParallel(self.teacher, device_ids=[RANK])
-                temp = self.teacher.eval()
+            # if self.teacher is not None:
+            #     self.teacher = nn.parallel.DistributedDataParallel(self.teacher, device_ids=[RANK])
+            #     temp = self.teacher.eval()
 
         # Check imgsz
         gs = max(int(self.model.stride.max() if hasattr(self.model, "stride") else 32), 32)  # grid size (max stride)
@@ -701,12 +707,14 @@ class BaseTrainer:
                     
                 # Add more distillation logic
                 if self.teacher is not None:
-                    distill_weight = ((1 - math.cos(i * math.pi / len(self.train_loader))) / 2) * (0.1 - 1) + 1
+                    p = (i + nb * epoch) / (nb * self.epochs)  # 전체 학습 진행률(0~1)
+                    w_min, w_max = 0.0, 0.3                     # 먼저 작게 시작
+                    distill_weight = w_min + (w_max - w_min) * (1 - math.cos(math.pi * p)) / 2
                     with torch.no_grad():
                         pred = self.teacher(batch['img'])
                         
                     self.d_loss = distillation_loss.get_loss()
-                    self.d_loss *- distill_weight
+                    self.d_loss *= distill_weight   
                     self.loss += self.d_loss
 
                 # Backward
@@ -1120,14 +1128,14 @@ class BaseTrainer:
                 else:  # weight (with decay)
                     g[0].append(param)
                     
-        if teacher is not None:
-            for v in teacher.modules():
-                if hasattr(v, 'bias') and isinstance(v.bias, nn.Parameter):
-                    g[2].append(v.bias)
-                if isinstance(v, bn):  # weight (no decay)
-                    g[1].append(v.weight)
-                elif hasattr(v, 'weight') and isinstance(v.weight, nn.Parameter):  # weight (with decay)
-                    g[0].append(v.weight)
+        # if teacher is not None:
+        #     for v in teacher.modules():
+        #         if hasattr(v, 'bias') and isinstance(v.bias, nn.Parameter):
+        #             g[2].append(v.bias)
+        #         if isinstance(v, bn):  # weight (no decay)
+        #             g[1].append(v.weight)
+        #         elif hasattr(v, 'weight') and isinstance(v.weight, nn.Parameter):  # weight (with decay)
+        #             g[0].append(v.weight)
 
         if name in {"Adam", "Adamax", "AdamW", "NAdam", "RAdam"}:
             optimizer = getattr(optim, name, optim.Adam)(g[2], lr=lr, betas=(momentum, 0.999), weight_decay=0.0)
